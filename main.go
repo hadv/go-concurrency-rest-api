@@ -8,13 +8,9 @@ import (
 	"time"
 )
 
-type weatherProvider interface {
-	temperature(city string) (float64, error) // in Kelvin, naturally
-}
-
 func main() {
 	mw := multiWeatherProvider{
-		openWeatherMap{},
+		openWeatherMap{apiKey: "5bd6d7d469feee97788f51744f8c2910"},
 		apixu{apiKey: "ff8b321075a54e7288794851162712"},
 	}
 
@@ -39,10 +35,16 @@ func main() {
 	http.ListenAndServe(":8080", nil)
 }
 
-type openWeatherMap struct{}
+type weatherProvider interface {
+	temperature(city string) (float64, error) // in Kelvin, naturally
+}
+
+type openWeatherMap struct {
+	apiKey string
+}
 
 func (w openWeatherMap) temperature(city string) (float64, error) {
-	resp, err := http.Get("http://api.openweathermap.org/data/2.5/weather?APPID=5bd6d7d469feee97788f51744f8c2910&q=" + city)
+	resp, err := http.Get("http://api.openweathermap.org/data/2.5/weather?APPID=" + w.apiKey + "&q=" + city)
 	if err != nil {
 		return 0, err
 	}
@@ -90,26 +92,39 @@ func (w apixu) temperature(city string) (float64, error) {
 	return kelvin, nil
 }
 
-type weatherData struct {
-	Name string `json:"name"`
-	Main struct {
-		Kelvin float64 `json:"temp"`
-	} `json:"main"`
-}
-
 type multiWeatherProvider []weatherProvider
 
 func (w multiWeatherProvider) temperature(city string) (float64, error) {
-	sum := 0.0
+	// Make a channel for temperatures, and a channel for errors.
+	// Each provider will push a value into only one.
+	temps := make(chan float64, len(w))
+	errs := make(chan error, len(w))
 
+	// For each provider, spawn a goroutine with an anonymous function.
+	// That function will invoke the temperature method, and forward the response.
 	for _, provider := range w {
-		k, err := provider.temperature(city)
-		if err != nil {
-			return 0, err
-		}
-
-		sum += k
+		go func(p weatherProvider) {
+			k, err := p.temperature(city)
+			if err != nil {
+				errs <- err
+				return
+			}
+			temps <- k
+		}(provider)
 	}
 
+	sum := 0.0
+
+	// Collect a temperature or an error from each provider.
+	for i := 0; i < len(w); i++ {
+		select {
+		case temp := <-temps:
+			sum += temp
+		case err := <-errs:
+			return 0, err
+		}
+	}
+
+	// Return the average, same as before.
 	return sum / float64(len(w)), nil
 }
